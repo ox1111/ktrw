@@ -1,14 +1,15 @@
 KTRW
 ===================================================================================================
 
-KTRW is an iOS kernel debugger for devices with an A11 SoC, such as the iPhone 8. It demonstrates
-how to use debug registers present on these devices to bypass KTRR, remap the kernel as writable,
-and load a kernel extension that implements a GDB stub, allowing full-featured kernel debugging
-with LLDB or IDA Pro over a standard Lightning to USB cable.
+KTRW는 iPhone 8과 같은 A11 SoC가 탑재된 기기를 위한 iOS 커널 디버거입니다. 이 문서에서는
+이러한 디바이스에 있는 디버그 레지스터를 사용하여 KTRR을 우회하고, 커널을 쓰기 가능으로 리매핑하고,
+GDB 스텁을 구현하는 커널 확장을 로드하여 모든 기능을 갖춘 커널 디버깅을 허용하는 방법을 보여줍니다.
+표준 Lightning-USB 케이블을 통해 LLDB 또는 IDA Pro를 사용할 수 있습니다.
 
-With the release of the [checkra1n] jailbreak and [pongoOS] pre-boot environment, it is possible to
-load KTRW as a kernel extension directly into the iOS kernelcache, so the original KTRR bypass is
-no longer used.
+checkra1n] 탈옥 및 [pongoOS] 사전 부팅 환경이 출시됨에 따라 다음을 수행할 수 있습니다.
+커널 확장으로 KTRW를 iOS 커널캐시에 직접 로드할 수 있으므로 원래의 KTRR 바이패스는
+더 이상 사용되지 않습니다.
+
 
 [checkra1n]: https://checkra.in
 [pongoOS]: https://github.com/checkra1n/pongoOS
@@ -17,62 +18,66 @@ no longer used.
 Bypassing KTRR
 ---------------------------------------------------------------------------------------------------
 
-KTRR was introduced with the A10 as a means of locking down critical kernel data (including all
-executable code) to prevent it from being modified, even by an attacker with a kernel memory
-read/write capability. However, on A11 SoCs, the ARMv8 External Debug registers and a proprietary
-register called DBGWRAP were left enabled. This makes it possible to subvert execution of the reset
-vector on these devices, skipping the MMU's KTRR initialization and setting a custom page table
-base that remaps the kernel as writable. Once KTRR has been disabled, it becomes possible to
-execute dynamically loaded kernel code, i.e., load kernel extensions.
 
-Note that even though the kernel is remapped as writable, the physical pages spanned by the AMCC
-RoRgn remain protected by the memory controller, and thus writes to these physical pages will be
-discarded. Bypassing KTRR on the MMU does not defeat KTRR on the AMCC, and thus the only way to
-remap the kernel as writable is to copy the kernel data in the AMCC RoRgn onto new, writable
-physical pages. But since the AMCC is still protecting the original physical pages, and since the
-reset vector executes from a physical address inside the AMCC RoRgn, the reset vector cannot be
-persistently modified to disable KTRR automatically on reset without a more powerful capability
-(such as a bootchain vulnerability). Thus, the KTRR bypass will disappear once the core resets
-normally (that is, without being hijacked using the debug registers from another core). This means
-that the KTRR bypass is not persistent: it will be lost once the device sleeps.
+
+KTRR은 중요한 커널 데이터(모든 실행 코드 포함)를 잠그는 수단으로 A10과 함께 도입되어 커널 메모리를 가진 공격자도 수정할 수 없도록 하는
+실행 코드를 포함하여) 커널 메모리를 가진 공격자라도 수정하지 못하도록 잠그는 수단으로 도입되었습니다.
+읽기/쓰기 기능을 가진 공격자도 수정할 수 없습니다. 그러나 A11 SoC에서는 ARMv8 외부 디버그 레지스터와 독점적인
+레지스터가 활성화되어 있었습니다. 이를 통해 이러한 디바이스에서 리셋 벡터의 실행을 무력화할 수 있습니다.
+벡터의 실행을 무력화하여 MMU의 KTRR 초기화를 건너뛰고 커널을 재매핑하는 사용자 정의 페이지 테이블
+커널을 쓰기 가능한 것으로 다시 매핑하는 사용자 정의 페이지 테이블을 설정할 수 있습니다. KTRR이 비활성화되면 다음과 같은 작업이 가능해집니다.
+동적으로 로드된 커널 코드 실행, 즉 커널 확장을 로드할 수 있습니다.
+
+커널이 쓰기 가능으로 리매핑되더라도, AMCC
+RoRgn에 의해 스팬된 물리적 페이지는 메모리 컨트롤러에 의해 보호되므로 이러한 물리적 페이지에 대한 쓰기는
+버려집니다. MMU에서 KTRR을 우회해도 AMCC에서 KTRR을 무효화할 수 없으므로, 유일한 방법은
+커널을 쓰기 가능한 것으로 다시 매핑하는 유일한 방법은 AMCC RoRgn의 커널 데이터를 쓰기 가능한 새 물리적 페이지에 복사하는 것입니다.
+물리적 페이지에 복사하는 것입니다. 그러나 AMCC는 여전히 원본 물리적 페이지를 보호하고 있고, 리셋 벡터가 물리적 페이지에서 실행되므로
+리셋 벡터는 AMCC RoRgn 내부의 물리적 주소에서 실행되므로, 리셋 벡터를
+더 강력한 기능 없이 재설정 시 자동으로 KTRR을 비활성화하도록 지속적으로 수정할 수 없습니다.
+(예: 부트체인 취약점) 없이는 재설정 시 KTRR을 자동으로 비활성화하도록 수정할 수 없습니다. 따라서, 코어가 정상적으로 재설정되면(즉, 부트체인 취약점에 걸리지 않고)
+정상적으로(즉, 다른 코어의 디버그 레지스터를 사용하여 하이재킹되지 않고) 사라집니다. 이는 곧
+KTRR 바이패스는 영구적이지 않으며, 디바이스가 절전 모드로 전환되면 사라집니다.
 
 
 Using KTRW
 ---------------------------------------------------------------------------------------------------
 
-KTRW consists of four components: the `pongo_kext_loader` utility, the `kextload.pongo-module`
-pongoOS module, the `ktrw_gdb_stub.ikext` kernel extension, and the `ktrw_usb_proxy` USB-to-TCP
-proxy utility. These can be built individually by ruunning `make` in each subdirectory or
-collectively by running `make` in the top-level directory.
+KTRW는 네 가지 구성 요소로 이루어져 있습니다: `pongo_kext_loader` 유틸리티, `kextload.pongo-module`
+pongoOS 모듈, `ktrw_gdb_stub.ikext` 커널 확장, `ktrw_usb_proxy` USB-to-TCP
+프록시 유틸리티. 이들은 각 하위 디렉터리에서 `make`를 실행하여 개별적으로 빌드하거나
+최상위 디렉터리에서 `make`를 실행하여 일괄적으로 빌드할 수 있습니다.
 
-To use KTRW, we'll run three utilities: [checkra1n], `pongo_kext_loader`, and `ktrw_usb_proxy`.
 
-Checkra1n uses the checkm8 SecureROM exploit to establish a pre-boot environment called pongoOS
-capable of loading arbitrary code modules and patching the kernel. Running the following command
-causes checkra1n to listen for attached iOS devices in DFU mode and boot pongoOS:
+KTRW를 사용하려면 세 가지 유틸리티를 실행합니다: [checkra1n], `pongo_kext_loader`, `ktrw_usb_proxy`입니다.
+
+Checkra1n은 checkm8 SecureROM 익스플로잇을 사용하여 pongoOS라는 사전 부팅 환경을 설정합니다.
+라는 사전 부팅 환경을 설정하여 임의의 코드 모듈을 로드하고 커널을 패치할 수 있습니다. 다음 명령을 실행하면
+을 실행하면 checkra1n이 DFU 모드에서 연결된 iOS 디바이스를 수신 대기하고 pongoOS를 부팅합니다:
 
 	$ /Applications/checkra1n.app/Contents/MacOS/checkra1n -c -p
 
-By itself pongoOS does not provide the ability to insert XNU kernel extensions into the kernelcache
-on the device; in order to do this we use `pongo_kext_loader` and `kextload.pongo-module`. The
-`kextload` pongoOS module adds two new commands to the pongoOS shell: `kernelcache-symbols`, which
-allows uploading a symbol table to resolve kernel symbols, and `kextload`, which inserts an
-uploaded kernel extension into the kernelcache. The `pongo_kext_loader` utility glues everything
-together: it listens for attached pongoOS devices, loads `kextload.pongo-module`, inserts the
-`ktrw_gdb_stub.ikext` kernel extension into the iOS kernelcache, and boots XNU.
+pongoOS 자체로는 장치의 커널캐시에 XNU 커널 확장을 삽입하는 기능을 제공하지 않습니다.
+에 삽입하는 기능을 제공하지 않습니다. 이를 위해 `pongo_kext_loader`와 `kextload.pongo-module`을 사용합니다. 이 경우
+kextload` pongoOS 모듈은 pongoOS 셸에 두 개의 새로운 명령어인 `kernelcache-symbols`를 추가합니다.
+커널 심볼을 확인하기 위해 심볼 테이블을 업로드할 수 있는 `커널 캐시 심볼`과 업로드된 커널 확장자를
+업로드된 커널 확장을 커널캐시에 삽입합니다. pongo_kext_loader` 유틸리티는 모든 것을 하나로 묶어줍니다.
+연결된 pongoOS 디바이스를 수신 대기하고, `kextload.pongo-module`을 로드하고, 커널 캐시에 업로드된
+ktrw_gdb_stub.ikext` 커널 확장자를 iOS 커널캐시에 삽입하고 XNU를 부팅합니다.
 
-Run the following command to have `pongo_kext_loader` load `ktrw_gdb_stub.ikext` on the iOS device
-at boot:
+다음 명령을 실행하여 `pongo_kext_loader`가 iOS 기기에서 `ktrw_gdb_stub.ikext`를 로드하도록 합니다.
+를 로드합니다:
+
 
 	$ pongo_kext_loader/pongo_kext_loader \
 		pongo_kextload/kextload.pongo-module \
 		ktrw_gdb_stub/kernel_symbols \
 		ktrw_gdb_stub/ktrw_gdb_stub.ikext
 
-The final utility that needs to run is `ktrw_usb_proxy`. `ktrw_usb_proxy` is needed to communicate
-with the kernel extension over USB and relay the data over TCP so that LLDB can connect to it. It
-will print the data being exchanged over the connection to stdout. Run `ktrw_usb_proxy` with the
-port number LLDB will connect to:
+마지막으로 실행해야 하는 유틸리티는 `ktrw_usb_proxy`입니다. ktrw_usb_proxy`는 USB를 통해 커널 확장 프로그램과 통신하기 위해 필요합니다.
+커널 확장 프로그램과 통신하고 LLDB가 연결할 수 있도록 TCP를 통해 데이터를 중계하는 데 필요합니다. It
+는 연결을 통해 교환되는 데이터를 stdout에 출력합니다. LLDB가 연결할 포트 번호와 함께 `ktrw_usb_proxy`를 실행합니다.
+포트 번호로 `ktrw_usb_프록시`를 실행합니다:
 
 	$ ktrw_usb_proxy/ktrw_usb_proxy 39399
 
