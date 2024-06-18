@@ -323,3 +323,241 @@ excessive heat that could permanently damage the device or cause physical burns.
 
 ---------------------------------------------------------------------------------------------------
 Developed and maintained by Brandon Azad of Google Project Zero, <bazad@google.com>
+
+
+
+
+
+
+
+---
+
+KTRW
+===================================================================================================
+
+KTRW is an iOS kernel debugger for devices with an A11 SoC, such as the iPhone 8. It leverages
+debug registers present on these devices to bypass KTRR, remap the kernel as writable, and load a
+kernel extension that implements a GDB stub, allowing full-featured kernel debugging with LLDB or
+IDA Pro over a standard Lightning to USB cable.
+
+
+Bypassing KTRR
+---------------------------------------------------------------------------------------------------
+
+KTRR was introduced with the A10 as a means of locking down critical kernel data (including all
+executable code) to prevent it from being modified, even by an attacker with a kernel memory
+read/write capability. However, on A11 SoCs, the ARMv8 External Debug registers and a proprietary
+register called DBGWRAP were left enabled. This makes it possible to subvert execution of the reset
+vector on these devices, skipping the MMU's KTRR initialization and setting a custom page table
+base that remaps the kernel as writable. Once KTRR has been disabled, it becomes possible to
+execute dynamically loaded kernel code, i.e., load kernel extensions.
+
+Note that even though the kernel is remapped as writable, the physical pages spanned by the AMCC
+RoRgn remain protected by the memory controller, and thus writes to these physical pages will be
+discarded. Bypassing KTRR on the MMU does not defeat KTRR on the AMCC, and thus the only way to
+remap the kernel as writable is to copy the kernel data in the AMCC RoRgn onto new, writable
+physical pages. But since the AMCC is still protecting the original physical pages, and since the
+reset vector executes from a physical address inside the AMCC RoRgn, the reset vector cannot be
+persistently modified to disable KTRR automatically on reset without a more powerful capability
+(such as a bootchain vulnerability). Thus, the KTRR bypass will disappear once the core resets
+normally (that is, without being hijacked using the debug registers from another core). This means
+that the KTRR bypass is not persistent: it will be lost once the device sleeps.
+
+
+Using KTRW
+---------------------------------------------------------------------------------------------------
+
+KTRW consists of three components: the `ktrw_gdb_stub.ikext` kernel extension, the `ktrw_usb_proxy`
+USB-to-TCP proxy utility, and the `ktrw_kext_loader` tool to load kernel extensions. Depending on
+how KTRW is being used, `ktrw_kext_loader` can be built as a command line tool or as an iOS app.
+
+First, build the kernel extension:
+
+	$ cd ktrw_gdb_stub
+	$ make
+
+The compiled iOS kext will automatically be copied to the `ktrw_kext_loader/kexts/` directory.
+
+Next, build the USB-to-TCP proxy utility:
+
+	$ cd ktrw_usb_proxy
+	$ make
+
+`ktrw_usb_proxy` is needed to communicate with the kernel extension over USB and relay the data
+over TCP so that LLDB can connect. It will print the data being exchanged over the connection. Run
+`ktrw_usb_proxy` with the port number LLDB will connect to:
+
+	$ ./ktrw_usb_proxy 39399
+
+Next, build `ktrw_kext_loader`. There are two modes of operation (depending on how the kernel task
+port is being exposed), and the build process depends on which is being used.
+
+If KTRW is being run with [checkra1n], then build `ktrw_kext_loader` as a command-line tool and scp
+the necessary files to the device:
+
+	$ cd ktrw_kext_loader
+	$ make
+	$ codesign -s '*' -f --entitlements ktrw_kext_loader.entitlements ktrw_kext_loader
+	$ scp ktrw_kext_loader iphone:
+	$ scp -r kernel_symbols iphone:
+	$ scp kexts/ktrw_gdb_stub.ikext iphone:
+
+Once all the necessary files are in place, ssh into the phone and run the kext loader:
+
+	$ ssh iphone
+	# ./ktrw_kext_loader ktrw_gdb_stub.ikext
+	[+] Platform: iPhone10,1 17B102
+	[+] task_for_pid(0) = 0x907
+	[!] Could not find the kernel base address
+	[!] Trying to find the kernel base address using an unsafe heap scan!
+	[+] KASLR slide is 0x178e4000
+	[+] Kext ktrw_gdb_stub.ikext loaded at address 0xffffffe0ca1a0000
+
+A separate process should be used if the kernel task port is exposed via host special port 4, for
+example after a kernel exploit. In this case, simply open the `ktw_kext_loader` project in Xcode
+and run the app on a connected A11 iPhone to load `ktrw_gdb_stub.ikext` into the kernel and start
+debugging.
+
+Once the kext has loaded (using either method), it will claim one CPU core for itself and halt the
+remaining cores. It will also hijack the Synopsys USB 2.0 OTG controller from the kernel so that it
+can communicate with the host. As a result, the host will not see the iPhone as an iOS device and
+the phone (once it has been resumed) will not be able to send data over USB as normal.
+
+After this, you are ready to debug the device.
+
+[checkra1n]: https://checkra.in
+
+
+Debugging with LLDB
+---------------------------------------------------------------------------------------------------
+
+Use LLDB to connect to `ktrw_usb_proxy` and communicate with `ktrw_gdb_stub.ikext`. Here I have
+connected to an iPhone 8 running iOS 12.1.2:
+
+	$ lldb kernelcache.iPhone10,1.16C101
+	(lldb) target create "kernelcache.iPhone10,1.16C101"
+	Current executable set to 'kernelcache.iPhone10,1.16C101' (arm64).
+	(lldb) settings set plugin.dynamic-loader.darwin-kernel.load-kexts false
+	(lldb) gdb-remote 39399
+	Kernel UUID: 94463A80-7B38-3176-8872-0B8E344C7138
+	Load Address: 0xfffffff027e04000
+	Kernel slid 0x20e00000 in memory.
+	Loaded kernel file kernelcache.iPhone10,1.16C101
+	Process 2 stopped
+	Target 0: (kernelcache.iPhone10,1.16C101) stopped.
+	(lldb)
+
+You can use `thread list` to list the code running on each physical CPU core. (Note that one core
+is reserved for the debugger itself, so it will not show up in the list.)
+
+	(lldb) th l
+	Process 2 stopped
+	* thread #1: tid = 0x0002, 0xfffffff027ffda18 kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol1734$$kernelcache.iPhone10,1.16C101 + 272
+	  thread #2: tid = 0x0003, 0xfffffff027ffda18 kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol1734$$kernelcache.iPhone10,1.16C101 + 272
+	  thread #3: tid = 0x0004, 0xfffffff027ffda18 kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol1734$$kernelcache.iPhone10,1.16C101 + 272
+	  thread #4: tid = 0x0005, 0xfffffff027ffda18 kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol1734$$kernelcache.iPhone10,1.16C101 + 272
+	  thread #5: tid = 0x0006, 0xfffffff027ffda18 kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol1734$$kernelcache.iPhone10,1.16C101 + 272
+	(lldb)
+
+Because KTRR has been disabled in the MMU and the kernel has been remapped as read/write, it is
+possible to patch kernel memory:
+
+	(lldb) x/12wx 0xfffffff027e04000
+	0xfffffff027e04000: 0xfeedfacf 0x0100000c 0x00000000 0x00000002
+	0xfffffff027e04010: 0x00000016 0x00001068 0x00200001 0x00000000
+	0xfffffff027e04020: 0x00000019 0x00000188 0x45545f5f 0x00005458
+	(lldb) mem wr -s 4 0xfffffff027e04000 0x11223344 0x55667788
+	(lldb) x/12wx 0xfffffff027e04000
+	0xfffffff027e04000: 0x11223344 0x55667788 0x00000000 0x00000002
+	0xfffffff027e04010: 0x00000016 0x00001068 0x00200001 0x00000000
+	0xfffffff027e04020: 0x00000019 0x00000188 0x45545f5f 0x00005458
+
+Resume executing the kernel with `continue`. You can interrupt it at any time with `^C`:
+
+	(lldb) c
+	Process 2 resuming
+	(lldb) ^C
+	Process 2 stopped
+	Target 0: (kernelcache.iPhone10,1.16C101) stopped.
+	(lldb)
+
+You can set breakpoints as usual. KTRW currently only supports hardware breakpoints, but LLDB will
+automatically detect this and set the appropriate breakpoint type:
+
+	(lldb) b 0xfffffff0282753b4
+	Breakpoint 1: where = kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol4960$$kernelcache.iPhone10,1.16C101, address = 0xfffffff0282753b4
+	(lldb) c
+	Process 2 resuming
+	Process 2 stopped
+	* thread #4, stop reason = breakpoint 1.1
+	    frame #0: 0xfffffff0282753b4 kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol4960$$kernelcache.iPhone10,1.16C101
+	kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol4960$$kernelcache.iPhone10,1.16C101:
+	->  0xfffffff0282753b4 <+0>:  sub    sp, sp, #0x80             ; =0x80
+	    0xfffffff0282753b8 <+4>:  stp    x28, x27, [sp, #0x20]
+	    0xfffffff0282753bc <+8>:  stp    x26, x25, [sp, #0x30]
+	    0xfffffff0282753c0 <+12>: stp    x24, x23, [sp, #0x40]
+	Target 0: (kernelcache.iPhone10,1.16C101) stopped.
+	(lldb)
+
+Single-stepping works as expected:
+
+	(lldb) si
+	Process 2 stopped
+	* thread #4, stop reason = instruction step into
+	    frame #0: 0xfffffff0282753b8 kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol4960$$kernelcache.iPhone10,1.16C101 + 4
+	kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol4960$$kernelcache.iPhone10,1.16C101:
+	->  0xfffffff0282753b8 <+4>:  stp    x28, x27, [sp, #0x20]
+	    0xfffffff0282753bc <+8>:  stp    x26, x25, [sp, #0x30]
+	    0xfffffff0282753c0 <+12>: stp    x24, x23, [sp, #0x40]
+	    0xfffffff0282753c4 <+16>: stp    x22, x21, [sp, #0x50]
+	Target 0: (kernelcache.iPhone10,1.16C101) stopped.
+	(lldb) si
+	Process 2 stopped
+	* thread #4, stop reason = instruction step into
+	    frame #0: 0xfffffff0282753bc kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol4960$$kernelcache.iPhone10,1.16C101 + 8
+	kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol4960$$kernelcache.iPhone10,1.16C101:
+	->  0xfffffff0282753bc <+8>:  stp    x26, x25, [sp, #0x30]
+	    0xfffffff0282753c0 <+12>: stp    x24, x23, [sp, #0x40]
+	    0xfffffff0282753c4 <+16>: stp    x22, x21, [sp, #0x50]
+	    0xfffffff0282753c8 <+20>: stp    x20, x19, [sp, #0x60]
+	Target 0: (kernelcache.iPhone10,1.16C101) stopped.
+	(lldb)
+
+Watchpoints are also supported:
+
+	(lldb) wa s e -s 8 -w read_write -- 0xfffffff027e04000
+	Watchpoint created: Watchpoint 1: addr = 0xfffffff027e04000 size = 8 state = enabled type = rw
+	    new value: 6153737367135073092
+	(lldb) reg w x1 0xfffffff027e04000
+	(lldb) c
+	Process 2 resuming
+	
+	Watchpoint 1 hit:
+	old value: 6153737367135073092
+	new value: 6153737367135073092
+	Process 2 stopped
+	* thread #5, stop reason = watchpoint 1
+	    frame #0: 0xfffffff028275418 kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol4960$$kernelcache.iPhone10,1.16C101 + 100
+	kernelcache.iPhone10,1.16C101`___lldb_unnamed_symbol4960$$kernelcache.iPhone10,1.16C101:
+	->  0xfffffff028275418 <+100>: and    x21, x9, x10
+	    0xfffffff02827541c <+104>: add    x10, x11, x10
+	    0xfffffff028275420 <+108>: add    x8, x10, w8, sxtw
+	    0xfffffff028275424 <+112>: and    x26, x9, x8
+	Target 0: (kernelcache.iPhone10,1.16C101) stopped.
+	(lldb) x/4i $pc-8
+	    0xfffffff028275410: 0x9360fd29   asr    x9, x9, #32
+	    0xfffffff028275414: 0xa9402eea   ldp    x10, x11, [x23]
+	->  0xfffffff028275418: 0x8a0a0135   and    x21, x9, x10
+	    0xfffffff02827541c: 0x8b0a016a   add    x10, x11, x10
+	(lldb) reg r x23 x10 x11
+	     x23 = 0xfffffff027e04000
+	     x10 = 0x5566778811223344
+	     x11 = 0x0000000200000000
+	(lldb)
+
+LLDB limits watchpoints to 1, 2, 4, or 8 bytes in size, even though the hardware supports even
+larger watchpoints.
+
+Unfortunately, older versions of LLDB do not automatically detect kernelcaches on iOS 12.2 or later
+because the kASLR slide has a finer granularity. However, kernelcache detection should work as
+expected on HEAD when LLDB is built from source.
